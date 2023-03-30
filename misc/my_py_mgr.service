@@ -1,0 +1,13 @@
+[Unit]
+Description=pyload & cloud service
+After=pyload.service
+
+[Service]
+User=gobbi
+ExecStart=/usr/bin/python3 /home/gobbi/projects/pyload_mgr/scripts/py_my_mgr.py
+Restart=on-failure
+# wait for pyload
+RestartSec=3s
+
+[Install]
+WantedBy=multi-user.target
