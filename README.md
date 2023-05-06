@@ -15,15 +15,25 @@ I'm trying to work on a solution for my home Plex server running on my Raspberry
 5. replace serviceAccountKey.json with the proper credentials.
 
 # How it works
-1. create a collection called pyload_queue
+1. create a collection called request_queue
 2. just add an entry inside the collection with the following structure
 
 ```
+// for pyload requests
     {
         "name": "my file to download",
         "links": [
             "0": "http://url_to_download/file.mkv",
+        "media_type": "<type>"
+    }
+
+// for manual requests
+    {
+        "name": "my file to download",
+        "type": "manual",
+        "expected_size": "xx GB",
+        "media_type": "<type>"
     }
 ```
-3. the mgr will fetch the queue delegating the download request to pyload daemon, which will then start it;
-4. the stats for the download are requested to pyload and pushed to pyload_download_running/pyload_download_finished collections;
+3. the mgr will fetch the queue delegating the download request to pyload daemon or to a monitor thread, which will then monitor the download;
+4. the stats for the download are pushed to download_running/download_finished collections;

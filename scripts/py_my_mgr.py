@@ -2,145 +2,179 @@ import threading
 import requests
 import json
 import time
+import os
+import glob
 import logging
 
-from systemd.journal import JournalHandler
-from models.pyload_data import *
-from models.pyload_enum import *
-from py_cloud import monitor_download_queue
+from pyload_wrapper_api import *
+from py_cloud import monitor_download_queue, get_storage_paths
+from utils import *
 from queue import Queue
 from models.msg import *
+from datetime import datetime, timezone
+from constants import *
 
-pyload_ip = "192.168.1.88:8000"
-api_url = f'http://{pyload_ip}/api/'
-
-def login(user, password):
-    payload = {"username": user, "password": password}
-    return requests.post("{}{}".format(api_url, "login"), data=payload)
-
-def get_queue(cookie):
-    response = requests.get("{}{}".format(api_url, "getQueue"), 
-                            cookies=cookie)
-    return response.json()
-
-def get_download_info(cookie):
-    downloads = []
-    response = requests.get("{}{}".format(api_url, "statusDownloads"), 
-                            cookies=cookie)
-    status = json.loads(response.text)
-    for st in status:
-        downloads.append(DownloadInfo(**st))
-    return downloads
-
-def get_package_data(cookie, id):
-    response = requests.get("{}{}".format(api_url, "getPackageData"), 
-                            cookies=cookie,
-                            params={"package_id": id})
-    status = json.loads(response.text)
-    return PackageData(**status)
-
-def print_package(pkg):
-    print(f'\tId:{pkg.pid} Name:"{pkg.name}"')
-    for link in pkg.links:
-        print(f'\t\tLink Name:"{link["name"]}')
-        print(f'\t\tSize:{link["format_size"]} Plugin: "{link["plugin"]}"')
-        print(f'\t\tLink URL:{link["url"]}')
-        print(f'\t\tStatus:{link["status"]} StatusMsg:{link["statusmsg"]}')
-
-# only one link supported
-def get_package_status(pkg):
-    return pkg.links[0]["status"]
-
-def print_queue(cookie):
-    queue = get_queue(cookie)
-    print("--> Queue:")
-    for i in queue:
-        pkgData = get_package_data(cookie, i['pid'])
-        print_package(pkgData)
-
-def add_package(cookie, name, links):
-    payload = {"name": name, "links": links}    
-    payloadJSON = {k: json.dumps(v) for k, v in payload.items()}
-    response = requests.get("{}{}".format(api_url, "addPackage"), 
-                        cookies=cookie,
-                        params=payloadJSON)
-    return response
-
-def handle_requests(data):
+def parse_requests(data):
     req = json.loads(data)
     msg = MyMgrRequest(**req)
-    if msg.type == MyMgrRequestType.DOWNLOAD_REQUEST:
-        log.info(f'new request, call API for {msg}')
-        download_name = msg.snapshot_id + "." + msg.payload["name"].replace(" ", "_")
-        add_package(response.cookies, download_name, msg.payload["links"])
+    return msg
 
-def sync_cloud(req_type, pkgData, progress):
+def sync_cloud(req_type, pkgData, progress, manual=False):
     req = MyMgrRequest(req_type)
     try:
-        req.pyload_to_snapshot(pkgData, progress)
+        if manual == False:
+            req.pyload_to_snapshot(pkgData, progress)
+        else:
+            req.manual_to_snapshot(pkgData, progress)
         q_cloud.put(req.build_msg())
-    except Exception:
+    except Exception as e:
         # pyload browser usage may not respect the name convention
         pass
-        
+
 ### monitor requests from message queue and trigger pyload downloads
-PYLOAD_MONITOR_TIME = 60
 def monitor_pyload(q_pyload, q_cloud):
     active_downloads = []
     while True:
-        log.debug("trying to get from pyload queue")
         try:
-            data = q_pyload.get_nowait()
-            handle_requests(data)
-        except Exception:
+            data = q_pyload.get()
+            request = parse_requests(data)
+            if request.type == MyMgrRequestType.DOWNLOAD_REQUEST:
+                add_api = False
+                if request.payload["pyload_pkg_id"] != -1:
+                    pkgData = get_package_data(response.cookies, request.payload["pyload_pkg_id"])
+                    if len(pkgData.links) > 0:
+                        status = pkgData.links[0]["status"]
+                        if status == DownloadStatus.DOWNLOADING:
+                            mylogger(f'{request.snapshot_id} already running at pyload, pkgData {pkgData.links}')
+                            add_api = False
+                        elif status != DownloadStatus.FINISHED:
+                            request.payload["links"] = []
+                            request.payload["links"].append(pkgData.links[0]["url"])
+                            add_api = True
+
+                ## add to pyload
+                if add_api == True:
+                    download_name = \
+                        request.snapshot_id + "." + \
+                        request.payload["name"].replace(" ", "_") + "." + \
+                        request.payload["media_type"]
+                    mylogger(f'new request, call API for {request.snapshot_id} - {request.payload} download_name {download_name}')
+                    add_package(response.cookies, download_name, request.payload["links"])
+                    time.sleep(2)
+        except Exception as e:
             pass
 
+        mylogger(f'check for downloads...{response.cookies}')
         downloads = get_download_info(response.cookies)
         for dwn in downloads:
-            log.debug(f'Download active: Name:"{dwn.name}" Size:{dwn.format_size} Progress:{dwn.percent}')
+            mylogger(f'Download active: Id: "{dwn.package_id}" Name:"{dwn.name}" Size:{dwn.format_size} Progress:{dwn.percent}')
             pkgData = get_package_data(response.cookies, dwn.package_id)
             if dwn.package_id not in active_downloads:
                 active_downloads.append(dwn.package_id)
 
             status = get_package_status(pkgData)
             if status == DownloadStatus.FINISHED:
-                log.debug("Finished!")
+                mylogger("Finished!")
             elif status == DownloadStatus.DOWNLOADING:
-                log.debug(f'Downloading {dwn.percent}')
+                mylogger(f'Downloading progress:{dwn.percent}')
                 sync_cloud(MyMgrRequestType.DOWNLOAD_IN_PROGRESS, pkgData, dwn.percent)
             elif status == DownloadStatus.ABORTED or \
                     status == DownloadStatus.FAILED or \
                     status == DownloadStatus.OFFLINE or \
                     status == DownloadStatus.TEMPOFFLINE or \
                     status == DownloadStatus.UNKNOWN:
-                log.debug("Ops, download failed!")
+                mylogger(f'Ops, download not running? status {status}')
             
         # no more downloads, get the final status
         if len(downloads) == 0 and len(active_downloads) > 0:
             for pkgid in active_downloads:
                 pkgData = get_package_data(response.cookies, pkgid)
                 status = get_package_status(pkgData)
-                log.debug(f'Finished package: {pkgid} final status: {status}')
+                mylogger(f'Finished package id:{pkgid} status:{status}')
                 progress = -1
                 if status == DownloadStatus.FINISHED:
                     progress = 100
+                    feed_file_to_plex(disks, pkgData, False)
                 sync_cloud(MyMgrRequestType.DOWNLOAD_FINISHED, pkgData, progress)
             active_downloads = []
 
-        time.sleep(PYLOAD_MONITOR_TIME)
+#### monitor download at the file system
+def monitor_manual_dwn(q_cloud, q_manual):
+    while True:
+        try:
+            data = q_manual.get()
+            req = parse_requests(data)
+        except Exception:
+            pass
+
+        filename = req.payload["name"]
+        expected_size = req.payload["expected_size"]
+        not_found = False
+        # it is easier to handle as strings
+        last_current_size = "0 B"
+        current_size = "0 B"
+        try:
+            filepath = glob.glob(f'/home/gobbi/Downloads/chromium/{filename}*')
+            if len(filepath) > 1:
+                raise Exception("Wildcard matched more than one name")
+            if len(filepath) == 0:
+                not_found = True
+            else:
+                req.payload["filepath"] = filepath[0]
+                stat = os.stat(filepath[0])
+                current_size = size_2string(stat.st_size)
+        except Exception as e:
+            continue
+
+        if current_size != "0 B":
+            last_current_size = req.payload["current_size"]
+        else:
+            last_current_size = req.payload["last_current_size"]
+
+        req.payload["current_size"] = current_size
+        req.payload["last_current_size"] = last_current_size
+
+        # handle states
+        if req.payload["timeout"] == 0:
+            mylogger(f'Download monitor timeout {req.payload}')
+            sync_cloud(MyMgrRequestType.DOWNLOAD_FINISHED, req, req.payload["progress"], True)
+        elif current_size == last_current_size:
+            # not touched for a while
+            req.payload["timeout"] = req.payload["timeout"] - CLOUD_MONITOR_TIME
+            sync_cloud(MyMgrRequestType.DOWNLOAD_IN_PROGRESS, req, req.payload["progress"], True)
+        elif expected_size == current_size:
+            mylogger(f'Download monitor finished {req.payload}')
+            sync_cloud(MyMgrRequestType.DOWNLOAD_FINISHED, req, 100, True)
+            feed_file_to_plex(disks, req, False)
+        elif not_found == True:
+            req.payload["timeout"] = req.payload["timeout"] - CLOUD_MONITOR_TIME
+            sync_cloud(MyMgrRequestType.DOWNLOAD_IN_PROGRESS, req, req.payload["progress"], True)
+        else:
+            current = string_2size(current_size)
+            expected = string_2size(expected_size)
+            percent = (current*100)/expected
+            req.payload["timeout"] = MANUAL_TIMEOUT
+            sync_cloud(MyMgrRequestType.DOWNLOAD_IN_PROGRESS, req, percent, True)
 
 response = login("pyload", "pyload")
 
+mylogger("Starting my pyLoad mgr...")
+q_pyload = Queue()
+q_cloud = Queue()
+q_manual = Queue()
+
+disks = get_storage_paths()
 log = logging.getLogger('mgr_pyload')
 log.addHandler(JournalHandler())
 log.setLevel(logging.DEBUG)
-log.info("Starting my pyLoad mgr...")
-q_pyload = Queue()
-q_cloud = Queue()
 
-backend_monitor = threading.Thread(target=monitor_download_queue, args=(q_pyload, q_cloud))
+backend_monitor = threading.Thread(target=monitor_download_queue, args=(q_pyload, q_cloud, q_manual))
 backend_monitor.start()
 
 pyload_monitor = threading.Thread(target=monitor_pyload, args=(q_pyload, q_cloud))
 pyload_monitor.start()
+
+manual_monitor = threading.Thread(target=monitor_manual_dwn, args=(q_cloud, q_manual))
+manual_monitor.start()
+
 pyload_monitor.join()
