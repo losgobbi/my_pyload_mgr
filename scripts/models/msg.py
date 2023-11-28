@@ -9,6 +9,8 @@ from constants import *
 class MyMgrRequestType(IntEnum):
     INVALID = 0
     DOWNLOAD_REQUEST = 10
+    DOWNLOAD_REQUESTED = 11
+    DOWNLOAD_MONITOR = 12
     DOWNLOAD_IN_PROGRESS = 20
     DOWNLOAD_FINISHED = 30
 
@@ -25,44 +27,34 @@ class MyMgrRequest():
             "name": snap_dic.get('name', f'unknown_name'),
             "links" : snap_dic.get('links', []),
             "type": snap_dic.get('type', f'pyload_req'),
-            "expected_size": snap_dic.get('expected_size', '0 B'),
+            "media_type": snap_dic.get('media_type', 'Others'),
             "progress": snap_dic.get('progress', 0),
+            "expected_size": snap_dic.get('expected_size', '0 B'),
             "last_current_size": snap_dic.get('last_current_size', '0 B'),
             "current_size": snap_dic.get('current_size', '0 B'),
             "timeout": snap_dic.get('timeout', MANUAL_TIMEOUT),
-            "media_type": snap_dic.get('media_type', 'Others'),
             "filepath": snap_dic.get('filepath', ''),
-            "pyload_pkg_id": snap_dic.get('pyload_pkg_id', -1)
+            "pyload_pkg_id": snap_dic.get('pyload_pkg_id', -1),
+            "pyload_links" : snap_dic.get('pyload_links', []),
         }
 
     def is_for_pyload(self):
         return self.payload["type"] == "pyload_req"
 
-    def pyload_to_snapshot(self, pkg: PackageData, progress):
-        self.snapshot_id, name, media_type = parse_pyload_name(pkg.name)
+    def auto_to_snapshot(self, pkg: PackageData, progress):
         self.payload = {
-            "pyload_name": name,
-            "pyload_pkg_id": pkg.pid,
-            "pyload_pkg_links" : pkg.links,
-            "pyload_progress": progress,
-            "type": "pyload_req",
-            "expected_size": 0,
-            "media_type": media_type
+            "progress": progress,
+            "pyload_links": pkg.links
         }
 
     def manual_to_snapshot(self, pkg, progress):
         self.snapshot_id = pkg.snapshot_id
         self.payload = {
-            "name": pkg.payload["name"],
             "progress": progress,
-            "type": "manual",
             "expected_size": pkg.payload["expected_size"],
             "last_current_size": pkg.payload["last_current_size"],
             "current_size": pkg.payload["current_size"],
             "timeout": pkg.payload["timeout"],
-            "links": [],
-            "media_type": pkg.payload["media_type"],
-            "filepath": pkg.payload["filepath"]
         }
 
     def build_msg(self):

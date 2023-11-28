@@ -14,7 +14,7 @@ def get_queue(cookie):
                             cookies=cookie)
     return response.json()
 
-def get_download_info(cookie):
+def get_downloads_info(cookie):
     downloads = []
     response = requests.get("{}{}".format(PYLOAD_API_URL, "statusDownloads"), 
                             cookies=cookie)
@@ -22,6 +22,14 @@ def get_download_info(cookie):
     for st in status:
         downloads.append(DownloadInfo(**st))
     return downloads
+
+def get_download_info(cookie, id):
+    downloads = get_downloads_info(cookie)
+    for dwn in downloads:
+        if dwn.package_id == id:
+            return dwn
+
+    return None
 
 def get_package_data(cookie, id):
     response = requests.get("{}{}".format(PYLOAD_API_URL, "getPackageData"), 
@@ -55,4 +63,5 @@ def add_package(cookie, name, links):
     response = requests.get("{}{}".format(PYLOAD_API_URL, "addPackage"), 
                         cookies=cookie,
                         params=payload_json)
-    return response
+    pkgid = json.loads(response.text)
+    return pkgid
